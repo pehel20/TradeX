@@ -1,0 +1,228 @@
+require("dotenv").config();
+
+const express = require("express");
+const mongoose = require("mongoose");
+
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const User = require("./model/UserModel");
+
+const bodyParser = require("body-parser");
+const cors = require("cors");
+const { GoogleGenAI } = require('@google/genai');
+
+const { HoldingsModel } = require("./model/HoldingsModel");
+const { PositionsModel } = require("./model/PositionsModel");
+const { OrdersModel } = require("./model/OrdersModel");
+
+const PORT = process.env.PORT || 3002;
+const uri = process.env.MONGO_URL;
+const verifyUser = require("./middleware/auth");
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+
+
+// app.get("/addPositions", async (req, res) => {
+//   let tempPositions = [
+//     {
+//       product: "CNC",
+//       name: "EVEREADY",
+//       qty: 2,
+//       avg: 316.27,
+//       price: 312.35,
+//       net: "+0.58%",
+//       day: "-1.24%",
+//       isLoss: true,
+//     },
+//     {
+//       product: "CNC",
+//       name: "JUBLFOOD",
+//       qty: 1,
+//       avg: 3124.75,
+//       price: 3082.65,
+//       net: "+10.04%",
+//       day: "-1.35%",
+//       isLoss: true,
+//     },
+//   ];
+
+//   tempPositions.forEach((item) => {
+//     let newPosition = new PositionsModel({
+//       product: item.product,
+//       name: item.name,
+//       qty: item.qty,
+//       avg: item.avg,
+//       price: item.price,
+//       net: item.net,
+//       day: item.day,
+//       isLoss: item.isLoss,
+//     });
+//     newPosition.save();
+//   });
+//   res.send("Done!");
+// });
+
+app.get('/allHoldings', verifyUser, async (req, res) => {
+  let allHoldings = await HoldingsModel.find({});
+  res.json(allHoldings);
+});
+
+app.get('/allPositions', verifyUser, async (req, res) => {
+  let allPositions = await PositionsModel.find({});
+  res.json(allPositions);
+});
+
+app.post("/newOrder", verifyUser, async (req, res) => {
+  const { name, qty, price, mode } = req.body;
+
+  try {
+    let holding = await HoldingsModel.findOne({ name });
+
+    if (mode === "SELL") {
+      if (!holding) {
+        return res.status(400).json({ message: "Stock not found" });
+      }
+
+      if (holding.qty < qty) {
+        return res.status(400).json({
+          message: "Not enough quantity to sell",
+        });
+      }
+
+      holding.qty -= Number(qty);
+      
+      if (holding.qty === 0) {
+        await HoldingsModel.deleteOne({ _id: holding._id });
+      } else {
+        await holding.save();
+      }
+    }
+
+    if (mode === "BUY") {
+      if (holding) {
+        const totalCost =
+          holding.avg * holding.qty + price * qty;
+
+        const totalQty = holding.qty + Number(qty);
+
+        holding.avg = totalCost / totalQty; 
+        holding.qty = totalQty;
+
+        await holding.save();
+      } else {
+        await HoldingsModel.create({
+          name,
+          qty: Number(qty),
+          avg: price,
+          price,
+          net: "+0%",
+          day: "+0%",
+        });
+      }
+    }
+
+    let newOrder = new OrdersModel({
+      name,
+      qty,
+      price,
+      mode,
+    });
+
+    await newOrder.save();
+
+    res.json({ message: "Order successful" });
+
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.get("/allOrders", verifyUser, async (req, res) => {
+  try {
+    const orders = await OrdersModel.find({});
+    res.json(orders);
+  } catch (err) {
+    console.log(err);
+    res.status(500).send("Error fetching orders");
+  }
+});
+
+app.post("/signup", async (req, res) => {
+  const { username, email, password } = req.body;
+
+  const existingUser = await User.findOne({ email });
+  if (existingUser) {
+    return res.json({ message: "User already exists" });
+  }
+
+  const hashedPassword = await bcrypt.hash(password, 10);
+
+  const newUser = new User({
+    username,
+    email,
+    password: hashedPassword,
+  });
+
+  await newUser.save();
+
+  res.json({ message: "Signup successful" });
+});
+
+
+app.post("/login", async (req, res) => {
+  const { email, password } = req.body;
+
+  const user = await User.findOne({ email });
+  if (!user) return res.json({ message: "User not found" });
+
+  const isMatch = await bcrypt.compare(password, user.password);
+  if (!isMatch) return res.json({ message: "Invalid password" });
+
+  const token = jwt.sign(
+    { id: user._id },
+    "SECRET_KEY",
+    { expiresIn: "365d" }
+  );
+
+  res.json({ token });
+});
+
+app.post("/chat", async (req, res) => {
+  const { message, history } = req.body;
+  try {
+    
+    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === "YOUR_KEY_HERE" || process.env.GEMINI_API_KEY === "") {
+      return res.json({ reply: "**Mock Mode:** I can function normally once you add `GEMINI_API_KEY` to the `backend/.env` file. You said: *" + message + "*" });
+    }
+    
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    
+    const contents = history.map(h => ({
+      role: h.role, 
+      parts: [{ text: h.content }]
+    }));
+    contents.push({ role: "user", parts: [{ text: message }] });
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: contents,
+      config: {
+         systemInstruction: "You are TradeBot, a smart AI assistant built into a Zerodha-clone trading platform. Help the user aggressively with stock market basics, making financial decisions, navigating the platform (like finding Holdings, analyzing Positions, adding Funds), and technical support. Be professional yet conversational. Give bulleted lists to be readable when asked for tips."
+      }
+    });
+
+    res.json({ reply: response.text });
+  } catch (err) {
+    console.error("Chat error:", err);
+    res.status(500).json({ reply: "Sorry, I had trouble talking to my AI server right now!" });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log("App started");
+  mongoose.connect(uri);
+  console.log("DB connected");
+});
