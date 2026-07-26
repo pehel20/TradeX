@@ -20,14 +20,28 @@ const uri = process.env.MONGO_URL;
 const verifyUser = require("./middleware/auth");
 const app = express();
 
-app.use(cors());
+// CORS configuration — reads allowed origins from env var, falls back to allow all
+const corsOptions = process.env.ALLOWED_ORIGINS
+  ? {
+      origin: process.env.ALLOWED_ORIGINS.split(",").map(o => o.trim()),
+      credentials: true,
+    }
+  : {}; // empty = allow all origins (good for local dev)
+
+app.use(cors(corsOptions));
 app.use(express.json());
+
+// Health check endpoint — useful for Render/Railway to verify the server is up
+app.get("/", (req, res) => {
+  res.json({ status: "TradeX API is running" });
+});
 
 
 app.get('/allHoldings', verifyUser, async (req, res) => {
   let allHoldings = await HoldingsModel.find({});
   res.json(allHoldings);
 });
+
 
 app.get('/allPositions', verifyUser, async (req, res) => {
   let allPositions = await PositionsModel.find({});
@@ -285,8 +299,12 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log("App started");
-  mongoose.connect(uri);
-  console.log("DB connected");
+app.listen(PORT, async () => {
+  console.log(`Server running on port ${PORT}`);
+  try {
+    await mongoose.connect(uri);
+    console.log("MongoDB connected successfully");
+  } catch (err) {
+    console.error("MongoDB connection error:", err.message);
+  }
 });
